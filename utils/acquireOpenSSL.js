@@ -41,7 +41,13 @@ class HashVerify extends stream.Transform {
 }
 
 const buildDarwin = async (buildCwd, macOsDeploymentTarget) => {
-  await execPromise(`./Configure darwin64-x86_64-cc shared enable-ec_nistp_64_gcc_128 no-ssl2 no-ssl3 no-comp --prefix="${
+  const triplet = process.arch === 'x64'
+    ? 'darwin64-x86_64-cc'
+    : 'darwin64-arm64-cc';
+
+  await execPromise(`./Configure ${
+    triplet
+  } no-shared enable-ec_nistp_64_gcc_128 no-ssl2 no-ssl3 no-comp --prefix="${
     extractPath
   }" --openssldir="${extractPath}" -mmacosx-version-min=${macOsDeploymentTarget}`, {
     cwd: buildCwd
@@ -110,6 +116,17 @@ const removeOpenSSLIfOudated = async (openSSLVersion) => {
   }
 };
 
+const makeOnStreamDownloadProgress = () => {
+  let lastReport = performance.now();
+  return ({ percent, transferred, total }) => {
+    const currentTime = performance.now();
+    if (currentTime - lastReport > 1 * 1000) {
+      lastReport = currentTime;
+      console.log(`progress: ${transferred}/${total} (${(percent * 100).toFixed(2)}%)`)
+    }
+  };
+};
+
 const buildOpenSSLIfNecessary = async (openSSLVersion, macOsDeploymentTarget) => {
   if (process.platform !== "darwin" && process.platform !== "win32") {
     console.log(`Skipping OpenSSL build, not required on ${process.platform}`);
@@ -130,14 +147,7 @@ const buildOpenSSLIfNecessary = async (openSSLVersion, macOsDeploymentTarget) =>
   const openSSLSha256 = (await got(openSSLSha256Url)).body.trim();
 
   const downloadStream = got.stream(openSSLUrl);
-  let lastReport = performance.now();
-  downloadStream.on("downloadProgress", ({ percent, transferred, total }) => {
-    const currentTime = performance.now();
-    if (currentTime - lastReport > 1 * 1000) {
-      lastReport = currentTime;
-      console.log(`progress: ${transferred}/${total} (${(percent * 100).toFixed(2)}%)`)
-    }
-  });
+  downloadStream.on("downloadProgress", makeOnStreamDownloadProgress());
   
   await pipeline(
     downloadStream,
@@ -161,8 +171,44 @@ const buildOpenSSLIfNecessary = async (openSSLVersion, macOsDeploymentTarget) =>
   console.log("Build finished.");
 }
 
+const downloadOpenSSLIfNecessary = async (downloadBinUrl, maybeDownloadSha256) => {
+  if (process.platform !== "darwin" && process.platform !== "win32") {
+    console.log(`Skipping OpenSSL download, not required on ${process.platform}`);
+    return;
+  }
+
+  try {
+    await fs.stat(extractPath);
+    console.log("Skipping OpenSSL download, dir exists");
+    return;
+  } catch {}
+
+  const downloadStream = got.stream(downloadBinUrl);
+  downloadStream.on("downloadProgress", makeOnStreamDownloadProgress());
+  
+  const pipelineSteps = [
+    downloadStream,
+    maybeDownloadSha256 ? new HashVerify("sha256", maybeDownloadSha256) : null,
+    zlib.createGunzip(),
+    tar.extract(extractPath)
+  ].filter(step => step !== null);
+  await pipeline(
+    ...pipelineSteps
+  );
+
+  console.log(`OpenSSL download + extract complete${maybeDownloadSha256 ? ": SHA256 OK." : "."}`);
+  console.log("Download finished.");
+}
+
 const acquireOpenSSL = async () => {
   try {
+    const maybeDownloadBinUrl = process.env.npm_config_openssl_bin_url;
+    if (maybeDownloadBinUrl) {
+      const maybeDownloadSha256 = process.env.npm_config_openssl_bin_sha256;
+      await downloadOpenSSLIfNecessary(maybeDownloadBinUrl, maybeDownloadSha256);
+      return;
+    }
+
     let macOsDeploymentTarget;
     if (process.platform === "darwin") {
       macOsDeploymentTarget = process.argv[2];
