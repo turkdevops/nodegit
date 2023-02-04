@@ -60,7 +60,7 @@
     "js-beautify": "~1.5.10",
     "jshint": "^2.9.6",
     "lcov-result-merger": "^3.1.0",
-    "mocha": "^5.2.0",
+    "mocha": "^10.2.0",
     "walk": "^2.3.9"
   },
   "binary": {
